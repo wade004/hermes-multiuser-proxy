@@ -2,6 +2,8 @@
 Multi-user reverse proxy for Hermes WebUI.
 Per-user credentials with auto profile binding.
 """
+import subprocess
+import logging
 import json
 import hashlib
 import hmac
@@ -17,6 +19,9 @@ DATA_DIR = Path(os.environ.get(
     "PROXY_DATA_DIR",
     os.path.expanduser("~/.hermes/webui")
 ))
+
+logger = logging.getLogger("users")
+
 USERS_FILE = DATA_DIR / "proxy_users.json"
 SESSIONS_FILE = DATA_DIR / "proxy_sessions.json"
 
@@ -78,8 +83,80 @@ def _save_users(users: dict) -> None:
     USERS_FILE.chmod(0o600)
 
 
+_HERMES_BIN = os.path.expanduser("~/.local/bin/hermes")
+
+
+def _ensure_hermes_profile(profile: str) -> bool:
+    """Create Hermes profile if it doesn't exist. Returns True on success."""
+    try:
+        # Check if profile already exists
+        result = subprocess.run(
+            [_HERMES_BIN, "profile", "list"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            # Parse text output: profile names are first column
+            lines = result.stdout.strip().split("\n")
+            for line in lines[1:]:  # skip header
+                parts = line.split()
+                if parts and parts[0].lstrip("◆●") == profile:
+                    logger.info(f"Profile '{profile}' already exists")
+                    return True
+
+        # Create the profile
+        result = subprocess.run(
+            [_HERMES_BIN, "profile", "create", profile],
+            capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            logger.info(f"Created Hermes profile: {profile}")
+            return True
+        else:
+            logger.error(f"Failed to create profile '{profile}': {result.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error creating profile '{profile}': {e}")
+        return False
+
+
+def _clear_profile_sessions(profile_name: str) -> None:
+    """Clear all sessions and messages from a profile's state.db.
+
+    Called after cloning a profile to prevent the new user from seeing
+    the source profile's chat history.
+    """
+    import sqlite3
+    hermes_home = Path(os.path.expanduser("~/.hermes"))
+    db_path = hermes_home / "profiles" / profile_name / "state.db"
+    if not db_path.exists():
+        return  # no db = nothing to clear
+    try:
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        for table in [
+            "messages", "sessions",
+            "messages_fts", "messages_fts_data", "messages_fts_idx",
+            "messages_fts_content", "messages_fts_docsize",
+            "messages_fts_trigram", "messages_fts_trigram_data",
+            "messages_fts_trigram_idx", "messages_fts_trigram_content",
+            "messages_fts_trigram_docsize",
+        ]:
+            try:
+                cur.execute(f"DELETE FROM [{table}]")
+            except Exception:
+                pass
+        conn.commit()
+        conn.close()
+        logger.info("Cleared inherited sessions for profile '%s'", profile_name)
+    except Exception as e:
+        logger.warning("Failed to clear sessions for profile '%s': %e", profile_name, e)
+
+
 def create_user(username: str, password: str, profile: str, role: str = "user") -> bool:
     """Create a new user. Returns False if username already exists."""
+    # Ensure Hermes profile exists
+    if not _ensure_hermes_profile(profile):
+        return False
     with _lock:
         users = _load_users()
         if username in users:
@@ -91,6 +168,8 @@ def create_user(username: str, password: str, profile: str, role: str = "user") 
             "created_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         _save_users(users)
+    # Clear inherited sessions from cloned profile
+    _clear_profile_sessions(profile)
     return True
 
 
@@ -160,21 +239,33 @@ def get_user(username: str) -> Optional[dict]:
 # ── Session management ──────────────────────────────────────────────────────
 
 def _load_sessions() -> dict:
+    """Load sessions. Returns {token: {"expiry": float, "username": str}}."""
     try:
         if SESSIONS_FILE.exists():
             data = json.loads(SESSIONS_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 now = time.time()
-                return {t: exp for t, exp in data.items()
-                        if isinstance(exp, (int, float)) and exp > now}
+                # Handle both old format (token->expiry) and new format (token->dict)
+                sessions = {}
+                for token, val in data.items():
+                    if isinstance(val, dict) and "expiry" in val and "username" in val:
+                        if val["expiry"] > now:
+                            sessions[token] = val
+                    elif isinstance(val, (int, float)) and val > now:
+                        # Old format: token -> expiry (no username, skip)
+                        pass
+                return sessions
     except Exception:
         pass
     return {}
 
 
 def _save_sessions(sessions: dict) -> None:
+    """Save sessions to file."""
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    SESSIONS_FILE.write_text(json.dumps(sessions), encoding="utf-8")
+    # Save full session data
+    save_data = {t: s for t, s in sessions.items()}
+    SESSIONS_FILE.write_text(json.dumps(save_data, indent=2), encoding="utf-8")
     SESSIONS_FILE.chmod(0o600)
 
 
@@ -189,7 +280,7 @@ def create_session(username: str) -> str:
             "expiry": time.time() + SESSION_TTL,
             "username": username,
         }
-        _save_sessions({t: s["expiry"] for t, s in _sessions.items()})
+        _save_sessions(_sessions)
     return token
 
 
@@ -201,7 +292,7 @@ def verify_session(token: str) -> Optional[str]:
             return None
         if time.time() > session["expiry"]:
             _sessions.pop(token, None)
-            _save_sessions({t: s["expiry"] for t, s in _sessions.items()})
+            _save_sessions(_sessions)
             return None
         return session["username"]
 
@@ -209,7 +300,7 @@ def verify_session(token: str) -> Optional[str]:
 def invalidate_session(token: str) -> None:
     with _lock:
         _sessions.pop(token, None)
-        _save_sessions({t: s["expiry"] for t, s in _sessions.items() })
+        _save_sessions(_sessions)
 
 
 # ── Rate limiting ───────────────────────────────────────────────────────────

@@ -28,6 +28,77 @@ PROFILE_COOKIE = "hermes_profile"  # must match hermes-webui's cookie name
 
 STATIC_DIR = Path(__file__).parent / "static"
 
+# JS snippet injected into every HTML response to add a logout button.
+# Placed next to the settings gear button in both desktop rail and mobile sidebar.
+_LOGOUT_INJECT_SCRIPT = """
+<script>
+(function(){
+  if(window.__proxyLogoutInjected) return;
+  window.__proxyLogoutInjected = true;
+  // Force profile label update from API (the WebUI's own boot.js may fail
+  // to update it due to race conditions or SSE errors)
+  function fixProfileLabel(){
+    try{
+      fetch('/api/profile/active',{credentials:'include',headers:{'Content-Type':'application/json'}})
+        .then(function(r){return r.json();})
+        .then(function(d){
+          if(d&&d.name){
+            var lbl=document.getElementById('profileChipLabel');
+            if(lbl) lbl.textContent=d.name;
+            if(window.S) S.activeProfile=d.name;
+          }
+        }).catch(function(){});
+    }catch(e){}
+  }
+  // Run after DOM ready, with a small delay to let boot.js finish first
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',function(){setTimeout(fixProfileLabel,500);});
+  } else {
+    setTimeout(fixProfileLabel,500);
+  }
+  // Also run periodically in case boot.js resets it
+  setInterval(fixProfileLabel,5000);
+  var _logoutSvg='<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>';
+  function addLogoutBtn(){
+    var injected=false;
+    // Desktop rail: insert after the settings button
+    var railSettings=document.querySelector('.rail button.rail-btn[data-panel="settings"]');
+    if(railSettings&&!railSettings.parentElement.querySelector('.proxy-logout-btn')){
+      var btn=document.createElement('button');
+      btn.className='rail-btn proxy-logout-btn has-tooltip';
+      btn.setAttribute('data-tooltip','退出登录');
+      btn.setAttribute('aria-label','Sign Out');
+      btn.innerHTML=_logoutSvg;
+      btn.style.cssText='cursor:pointer';
+      btn.onclick=function(){window.location.href='/proxy/logout'};
+      railSettings.parentElement.insertBefore(btn,railSettings.nextSibling);
+      injected=true;
+    }
+    // Mobile sidebar: insert after the settings button
+    var sideSettings=document.querySelector('.sidebar-nav button[data-panel="settings"]');
+    if(sideSettings&&!sideSettings.parentElement.querySelector('.sidebar-nav .proxy-logout-btn')){
+      var btn2=document.createElement('button');
+      btn2.className='nav-tab proxy-logout-btn has-tooltip has-tooltip--bottom';
+      btn2.setAttribute('data-tooltip','退出登录');
+      btn2.setAttribute('data-label','Logout');
+      btn2.setAttribute('aria-label','Sign Out');
+      btn2.innerHTML=_logoutSvg;
+      btn2.style.cssText='cursor:pointer';
+      btn2.onclick=function(){window.location.href='/proxy/logout'};
+      sideSettings.parentElement.insertBefore(btn2,sideSettings.nextSibling);
+      injected=true;
+    }
+    if(!injected) setTimeout(addLogoutBtn,1000);
+  }
+  if(document.readyState==='loading'){
+    document.addEventListener('DOMContentLoaded',addLogoutBtn);
+  } else {
+    addLogoutBtn();
+  }
+})();
+</script>
+"""
+
 # Paths that don't require auth
 PUBLIC_PATHS = {
     "/proxy/login",
@@ -38,7 +109,7 @@ PUBLIC_PATHS = {
 }
 
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,
     format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
 )
 
@@ -150,11 +221,18 @@ async def handle_login_api(request: web.Request) -> web.Response:
 
 
 async def handle_logout(request: web.Request) -> web.Response:
-    """Clear session and redirect to login."""
+    """Clear session, wipe browser state, and redirect to login."""
     token = _get_session_token(request)
     if token:
         users.invalidate_session(token)
-    resp = web.Response(status=302, headers={"Location": "/proxy/login"})
+    # Serve a page that clears localStorage (to remove stale session IDs)
+    # then redirects to login. This prevents cross-user session leakage.
+    html = """<!DOCTYPE html>
+<html><head><script>
+try{localStorage.clear();sessionStorage.clear();}catch(e){}
+window.location.href='/proxy/login';
+</script></head><body>Logging out...</body></html>"""
+    resp = web.Response(text=html, content_type="text/html")
     resp.del_cookie(SESSION_COOKIE, path="/")
     resp.del_cookie(PROFILE_COOKIE, path="/")
     return resp
@@ -164,12 +242,25 @@ async def handle_health(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "service": "hermes-multiuser-proxy"})
 
 
+async def handle_admin_page(request: web.Request) -> web.Response:
+    """Serve the admin user management page (admin only)."""
+    if not _is_admin(request):
+        raise web.HTTPFound("/proxy/login?next=/proxy/admin")
+    html = (STATIC_DIR / "admin.html").read_text(encoding="utf-8")
+    return web.Response(text=html, content_type="text/html")
+
+
 # ── User management API (admin only) ────────────────────────────────────────
 
 async def handle_users_list(request: web.Request) -> web.Response:
     if not _is_admin(request):
         return web.json_response({"error": "forbidden"}, status=403)
-    return web.json_response(users.list_users())
+    users_dict = users.list_users()
+    users_list = [
+        {"username": u, **info}
+        for u, info in users_dict.items()
+    ]
+    return web.json_response({"users": users_list})
 
 
 async def handle_users_create(request: web.Request) -> web.Response:
@@ -258,22 +349,35 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             continue
         headers[key] = val
 
-    # Inject profile cookie for non-admin users
-    user_info = users.get_user(username)
-    if user_info and user_info["role"] != "admin":
-        profile = user_info["profile"]
-        # Merge with existing cookies, replacing any hermes_profile
-        existing_cookies = headers.get("Cookie", "")
-        parts = [p.strip() for p in existing_cookies.split(";") if p.strip()]
-        parts = [p for p in parts if not p.startswith(f"{PROFILE_COOKIE}=")]
-        parts.append(f"{PROFILE_COOKIE}={profile}")
-        headers["Cookie"] = "; ".join(parts)
-    elif user_info and user_info["role"] == "admin":
-        # Admin: keep whatever profile cookie they set (or default)
-        pass
+    # Set X-Forwarded-Host so hermes-webui can validate CSRF origin
+    headers["X-Forwarded-Host"] = request.headers.get("Host", "")
 
-    # Read request body
+    # Inject profile cookie for all authenticated users
+    user_info = users.get_user(username)
+    if user_info:
+        profile = user_info["profile"]
+        # Rebuild Cookie header: keep all cookies EXCEPT hermes_profile,
+        # then add the correct hermes_profile for this user.
+        # Use case-insensitive search to handle HTTP/2 lowercase headers.
+        existing_cookies = ""
+        for hk, hv in headers.items():
+            if hk.lower() == "cookie":
+                existing_cookies = hv
+                break
+        parts = [p.strip() for p in existing_cookies.split(";") if p.strip()]
+        parts = [p for p in parts if not p.lower().startswith(f"{PROFILE_COOKIE}=")]
+        parts.append(f"{PROFILE_COOKIE}={profile}")
+        # Always set as "Cookie" (canonical case)
+        headers = {k: v for k, v in headers.items() if k.lower() != "cookie"}
+        headers["Cookie"] = "; ".join(parts)
+        logger.debug("PROXY [%s] %s → injecting hermes_profile=%s", username, path, profile)
+
+    # Read request body (not needed for WebSocket or GET)
     body = await request.read() if request.method in ("POST", "PUT", "PATCH") else None
+
+    # Handle WebSocket upgrade BEFORE making HTTP request
+    if _is_websocket_upgrade(request):
+        return await _proxy_websocket(request, url, headers)
 
     # Forward via aiohttp client session
     session = request.app["client_session"]
@@ -286,9 +390,6 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             timeout=aiohttp.ClientTimeout(total=300),
             allow_redirects=False,
         ) as upstream_resp:
-            # Check if this is a WebSocket upgrade
-            if _is_websocket_upgrade(request):
-                return await _proxy_websocket(request, url, headers)
 
             # Build response
             resp = web.StreamResponse(
@@ -310,10 +411,38 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
                     samesite=morsel.get("samesite", "Lax"),
                 )
 
-            await resp.prepare(request)
+            # Check if we should inject the logout button script
+            ct = (upstream_resp.headers.get("Content-Type") or "").lower()
+            is_html = "text/html" in ct
 
-            async for chunk in upstream_resp.content.iter_any():
-                await resp.write(chunk)
+            if is_html:
+                # Buffer HTML response so we can inject the logout script
+                body_bytes = await upstream_resp.read()
+                # Decompress if needed (proxy uses auto_decompress=False)
+                encoding = (upstream_resp.headers.get("Content-Encoding") or "").lower()
+                if encoding in ("gzip", "deflate"):
+                    import zlib
+                    if encoding == "gzip":
+                        body_bytes = zlib.decompress(body_bytes, zlib.MAX_WBITS | 16)
+                    else:
+                        body_bytes = zlib.decompress(body_bytes)
+                body_text = body_bytes.decode("utf-8", errors="replace")
+                if "</body>" in body_text:
+                    body_text = body_text.replace("</body>", _LOGOUT_INJECT_SCRIPT + "</body>")
+                elif "</html>" in body_text:
+                    body_text = body_text.replace("</html>", _LOGOUT_INJECT_SCRIPT + "</html>")
+                else:
+                    body_text += _LOGOUT_INJECT_SCRIPT
+                encoded = body_text.encode("utf-8")
+                resp.headers["Content-Length"] = str(len(encoded))
+                # We decoded the body, so strip compression header
+                resp.headers.pop("Content-Encoding", None)
+                await resp.prepare(request)
+                await resp.write(encoded)
+            else:
+                await resp.prepare(request)
+                async for chunk in upstream_resp.content.iter_any():
+                    await resp.write(chunk)
 
             await resp.write_eof()
             return resp
@@ -383,6 +512,8 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
         return await handle_health(request)
 
     # Admin user management API
+    if path == "/proxy/admin" or path == "/proxy/admin/":
+        return await handle_admin_page(request)
     if path == "/proxy/api/users" and request.method == "GET":
         return await handle_users_list(request)
     if path == "/proxy/api/users" and request.method == "POST":
@@ -393,10 +524,10 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
         parts = path.split("/")
         if len(parts) == 5:
             username = parts[4]
+            request.match_info["username"] = username
             if request.method == "DELETE":
                 return await handle_users_delete(request)
             if request.method in ("PUT", "PATCH"):
-                request.match_info["username"] = username
                 return await handle_users_update(request)
 
     return None
@@ -405,7 +536,17 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
 # ── App factory ─────────────────────────────────────────────────────────────
 
 async def _on_startup(app: web.Application) -> None:
-    app["client_session"] = aiohttp.ClientSession()
+    # force_close=True: disable HTTP connection pooling to prevent response
+    # body leakage between requests (aiohttp with auto_decompress=False can
+    # leave unconsumed bytes that corrupt subsequent requests on the same conn).
+    connector = aiohttp.TCPConnector(force_close=True)
+    # auto_decompress=False: forward gzip responses as-is to the browser.
+    # Without this, aiohttp decompresses the body but we still forward the
+    # Content-Encoding: gzip header, causing browsers to fail parsing CSS/JS.
+    app["client_session"] = aiohttp.ClientSession(
+        auto_decompress=False,
+        connector=connector,
+    )
 
 
 def create_app() -> web.Application:

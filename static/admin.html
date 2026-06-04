@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes — 用户管理</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#1a1a2e;color:#e8e8f0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    min-height:100vh;padding:24px
+  }
+  .container{max-width:800px;margin:0 auto}
+  .header{
+    display:flex;align-items:center;justify-content:space-between;
+    margin-bottom:24px;padding-bottom:16px;
+    border-bottom:1px solid rgba(255,255,255,.08)
+  }
+  .logo-area{display:flex;align-items:center;gap:12px}
+  .logo{
+    width:40px;height:40px;border-radius:10px;
+    background:linear-gradient(145deg,#e8a030,#e94560);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:18px;color:#fff
+  }
+  h1{font-size:20px;font-weight:600}
+  .sub{font-size:12px;color:#8888aa}
+  .actions{display:flex;gap:10px}
+  .btn{
+    padding:8px 16px;border-radius:8px;border:none;
+    font-size:13px;font-weight:500;cursor:pointer;transition:all .15s
+  }
+  .btn-primary{
+    background:rgba(124,185,255,.15);
+    border:1px solid rgba(124,185,255,.3);color:#7cb9ff
+  }
+  .btn-primary:hover{background:rgba(124,185,255,.25)}
+  .btn-danger{
+    background:rgba(233,69,96,.15);
+    border:1px solid rgba(233,69,96,.3);color:#e94560
+  }
+  .btn-danger:hover{background:rgba(233,69,96,.25)}
+  .btn-logout{
+    background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.1);color:#8888aa
+  }
+  .btn-logout:hover{background:rgba(255,255,255,.1);color:#e8e8f0}
+  .card{
+    background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:12px;
+    padding:20px;box-shadow:0 4px 16px rgba(0,0,0,.2)
+  }
+  .table-header{
+    display:flex;align-items:center;justify-content:space-between;margin-bottom:16px
+  }
+  .table-header h2{font-size:16px;font-weight:600}
+  .badge{
+    display:inline-block;padding:2px 8px;border-radius:4px;
+    font-size:11px;font-weight:600
+  }
+  .badge-admin{background:rgba(232,160,48,.2);color:#e8a030}
+  .badge-user{background:rgba(124,185,255,.15);color:#7cb9ff}
+  table{width:100%;border-collapse:collapse}
+  th{
+    text-align:left;padding:10px 12px;font-size:12px;font-weight:500;
+    color:#8888aa;border-bottom:1px solid rgba(255,255,255,.06)
+  }
+  td{
+    padding:12px;font-size:13px;border-bottom:1px solid rgba(255,255,255,.04)
+  }
+  tr:hover{background:rgba(255,255,255,.02)}
+  .action-btn{
+    padding:4px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.04);color:#e8e8f0;font-size:12px;
+    cursor:pointer;margin-right:6px;transition:all .15s
+  }
+  .action-btn:hover{background:rgba(255,255,255,.1)}
+  .action-btn.delete{color:#e94560;border-color:rgba(233,69,96,.3)}
+  .action-btn.delete:hover{background:rgba(233,69,96,.15)}
+  .empty{text-align:center;padding:32px;color:#8888aa;font-size:13px}
+
+  /* Modal */
+  .modal-overlay{
+    display:none;position:fixed;top:0;left:0;right:0;bottom:0;
+    background:rgba(0,0,0,.6);z-index:100;
+    align-items:center;justify-content:center
+  }
+  .modal-overlay.active{display:flex}
+  .modal{
+    background:#16213e;border:1px solid rgba(255,255,255,.1);border-radius:14px;
+    padding:24px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,.4)
+  }
+  .modal h3{font-size:16px;margin-bottom:16px}
+  .form-group{margin-bottom:14px}
+  .form-group label{display:block;font-size:12px;color:#8888aa;margin-bottom:6px}
+  .form-group input, .form-group select{
+    width:100%;padding:8px 12px;border-radius:8px;
+    border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.04);color:#e8e8f0;font-size:13px;
+    outline:none;transition:border-color .15s
+  }
+  .form-group input:focus, .form-group select:focus{
+    border-color:rgba(124,185,255,.5)
+  }
+  .form-group select option{background:#16213e;color:#e8e8f0}
+  .modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:18px}
+  .msg{font-size:12px;padding:8px 12px;border-radius:8px;margin-bottom:14px;display:none}
+  .msg.success{display:block;background:rgba(80,200,120,.15);color:#50c878;border:1px solid rgba(80,200,120,.3)}
+  .msg.error{display:block;background:rgba(233,69,96,.15);color:#e94560;border:1px solid rgba(233,69,96,.3)}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <div class="logo-area">
+      <div class="logo">H</div>
+      <div>
+        <h1>用户管理</h1>
+        <p class="sub">Hermes Multi-User Proxy Admin</p>
+      </div>
+    </div>
+    <div class="actions">
+      <button class="btn btn-primary" onclick="showAddModal()">+ 添加用户</button>
+      <a href="/proxy/logout" class="btn btn-logout">退出登录</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="table-header">
+      <h2>用户列表</h2>
+      <span id="user-count" style="font-size:12px;color:#8888aa"></span>
+    </div>
+    <div id="msg" class="msg"></div>
+    <table>
+      <thead>
+        <tr>
+          <th>用户名</th>
+          <th>Profile</th>
+          <th>角色</th>
+          <th>创建时间</th>
+          <th>操作</th>
+        </tr>
+      </thead>
+      <tbody id="user-list">
+        <tr><td colspan="5" class="empty">加载中...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Add/Edit Modal -->
+<div class="modal-overlay" id="modal">
+  <div class="modal">
+    <h3 id="modal-title">添加用户</h3>
+    <div id="modal-msg" class="msg"></div>
+    <form id="user-form">
+      <input type="hidden" id="editing-user" value="">
+      <div class="form-group">
+        <label>用户名</label>
+        <input type="text" id="input-username" placeholder="英文用户名" autocomplete="off" required>
+      </div>
+      <div class="form-group">
+        <label>密码</label>
+        <input type="password" id="input-password" placeholder="留空则不修改" autocomplete="new-password">
+      </div>
+      <div class="form-group">
+        <label>Profile 名称</label>
+        <input type="text" id="input-profile" placeholder="将自动创建 Hermes Profile" autocomplete="off" required>
+      </div>
+      <div class="form-group">
+        <label>角色</label>
+        <select id="input-role">
+          <option value="user">普通用户</option>
+          <option value="admin">管理员</option>
+        </select>
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="btn btn-logout" onclick="closeModal()">取消</button>
+        <button type="submit" class="btn btn-primary" id="submit-btn">创建</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Delete Confirm Modal -->
+<div class="modal-overlay" id="delete-modal">
+  <div class="modal">
+    <h3>确认删除</h3>
+    <p style="font-size:13px;color:#aaa;margin-bottom:16px">
+      确定要删除用户 <strong id="delete-username"></strong> 吗？<br>
+      <span style="color:#e94560">此操作不可撤销。</span>
+    </p>
+    <div class="modal-actions">
+      <button class="btn btn-logout" onclick="closeDeleteModal()">取消</button>
+      <button class="btn btn-danger" id="confirm-delete-btn" onclick="confirmDelete()">删除</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  var API = '/proxy/api/users';
+  var users = [];
+  var deletingUser = null;
+
+  function showMsg(text, type) {
+    var el = document.getElementById('msg');
+    el.textContent = text;
+    el.className = 'msg ' + type;
+    setTimeout(function() { el.className = 'msg'; }, 3000);
+  }
+
+  function showModalMsg(text, type) {
+    var el = document.getElementById('modal-msg');
+    el.textContent = text;
+    el.className = 'msg ' + type;
+  }
+
+  async function loadUsers() {
+    try {
+      var resp = await fetch(API, {credentials: 'include'});
+      if (resp.status === 403) {
+        window.location.href = '/proxy/login';
+        return;
+      }
+      var data = await resp.json();
+      users = data.users || [];
+      renderUsers();
+    } catch(e) {
+      document.getElementById('user-list').innerHTML =
+        '<tr><td colspan="5" class="empty">加载失败</td></tr>';
+    }
+  }
+
+  function renderUsers() {
+    var tbody = document.getElementById('user-list');
+    var count = document.getElementById('user-count');
+    count.textContent = '共 ' + users.length + ' 个用户';
+
+    if (users.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" class="empty">暂无用户</td></tr>';
+      return;
+    }
+
+    tbody.innerHTML = users.map(function(u) {
+      var roleClass = u.role === 'admin' ? 'badge-admin' : 'badge-user';
+      var roleText = u.role === 'admin' ? '管理员' : '用户';
+      return '<tr>' +
+        '<td><strong>' + escHtml(u.username) + '</strong></td>' +
+        '<td><code style="font-size:12px;color:#7cb9ff">' + escHtml(u.profile) + '</code></td>' +
+        '<td><span class="badge ' + roleClass + '">' + roleText + '</span></td>' +
+        '<td style="font-size:12px;color:#8888aa">' + escHtml(u.created_at || '-') + '</td>' +
+        '<td>' +
+          '<button class="action-btn" onclick="editUser(\'' + escHtml(u.username) + '\')">编辑</button>' +
+          '<button class="action-btn delete" onclick="deleteUser(\'' + escHtml(u.username) + '\')">删除</button>' +
+        '</td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function escHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s || '';
+    return d.innerHTML;
+  }
+
+  window.showAddModal = function() {
+    document.getElementById('modal-title').textContent = '添加用户';
+    document.getElementById('editing-user').value = '';
+    document.getElementById('input-username').value = '';
+    document.getElementById('input-username').disabled = false;
+    document.getElementById('input-password').value = '';
+    document.getElementById('input-password').placeholder = '必填';
+    document.getElementById('input-password').required = true;
+    document.getElementById('input-profile').value = '';
+    document.getElementById('input-role').value = 'user';
+    document.getElementById('submit-btn').textContent = '创建';
+    document.getElementById('modal-msg').className = 'msg';
+    document.getElementById('modal').classList.add('active');
+  };
+
+  window.editUser = function(username) {
+    var u = users.find(function(x) { return x.username === username; });
+    if (!u) return;
+    document.getElementById('modal-title').textContent = '编辑用户';
+    document.getElementById('editing-user').value = username;
+    document.getElementById('input-username').value = username;
+    document.getElementById('input-username').disabled = true;
+    document.getElementById('input-password').value = '';
+    document.getElementById('input-password').placeholder = '留空则不修改';
+    document.getElementById('input-password').required = false;
+    document.getElementById('input-profile').value = u.profile;
+    document.getElementById('input-role').value = u.role;
+    document.getElementById('submit-btn').textContent = '保存';
+    document.getElementById('modal-msg').className = 'msg';
+    document.getElementById('modal').classList.add('active');
+  };
+
+  window.closeModal = function() {
+    document.getElementById('modal').classList.remove('active');
+  };
+
+  window.deleteUser = function(username) {
+    deletingUser = username;
+    document.getElementById('delete-username').textContent = username;
+    document.getElementById('delete-modal').classList.add('active');
+  };
+
+  window.closeDeleteModal = function() {
+    document.getElementById('delete-modal').classList.remove('active');
+    deletingUser = null;
+  };
+
+  window.confirmDelete = async function() {
+    if (!deletingUser) return;
+    var btn = document.getElementById('confirm-delete-btn');
+    btn.disabled = true;
+    btn.textContent = '删除中...';
+    try {
+      var resp = await fetch(API + '/' + deletingUser, {
+        method: 'DELETE',
+        credentials: 'include'
+      });
+      var data = await resp.json();
+      if (data.ok) {
+        showMsg('用户 ' + deletingUser + ' 已删除', 'success');
+        closeDeleteModal();
+        loadUsers();
+      } else {
+        showMsg(data.error || '删除失败', 'error');
+      }
+    } catch(e) {
+      showMsg('请求失败', 'error');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '删除';
+    }
+  };
+
+  document.getElementById('user-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+    var editing = document.getElementById('editing-user').value;
+    var username = document.getElementById('input-username').value.trim();
+    var password = document.getElementById('input-password').value;
+    var profile = document.getElementById('input-profile').value.trim();
+    var role = document.getElementById('input-role').value;
+
+    if (!username || !profile) {
+      showModalMsg('用户名和 Profile 不能为空', 'error');
+      return;
+    }
+    if (!editing && !password) {
+      showModalMsg('新用户必须设置密码', 'error');
+      return;
+    }
+
+    var btn = document.getElementById('submit-btn');
+    btn.disabled = true;
+
+    try {
+      var resp, data;
+      if (editing) {
+        var body = {profile: profile, role: role};
+        if (password) body.password = password;
+        resp = await fetch(API + '/' + editing, {
+          method: 'PUT',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify(body),
+          credentials: 'include'
+        });
+      } else {
+        resp = await fetch(API, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({username: username, password: password, profile: profile, role: role}),
+          credentials: 'include'
+        });
+      }
+      data = await resp.json();
+      if (data.ok) {
+        showMsg(editing ? '用户已更新' : '用户已创建', 'success');
+        closeModal();
+        loadUsers();
+      } else {
+        showModalMsg(data.error || '操作失败', 'error');
+      }
+    } catch(e) {
+      showModalMsg('请求失败', 'error');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  // Close modals on overlay click
+  document.getElementById('modal').addEventListener('click', function(e) {
+    if (e.target === this) closeModal();
+  });
+  document.getElementById('delete-modal').addEventListener('click', function(e) {
+    if (e.target === this) closeDeleteModal();
+  });
+
+  loadUsers();
+})();
+</script>
+</body>
+</html>
