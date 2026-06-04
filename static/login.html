@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hermes — 登录</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    background:#1a1a2e;color:#e8e8f0;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;
+    height:100vh;display:flex;align-items:center;justify-content:center
+  }
+  .card{
+    background:#16213e;border:1px solid rgba(255,255,255,.08);border-radius:16px;
+    padding:36px 32px;width:340px;text-align:center;
+    box-shadow:0 8px 32px rgba(0,0,0,.3)
+  }
+  .logo{
+    width:48px;height:48px;border-radius:12px;
+    background:linear-gradient(145deg,#e8a030,#e94560);
+    display:flex;align-items:center;justify-content:center;
+    font-weight:800;font-size:20px;color:#fff;
+    margin:0 auto 12px;box-shadow:0 2px 12px rgba(233,69,96,.3)
+  }
+  h1{font-size:18px;font-weight:600;margin-bottom:4px}
+  .sub{font-size:12px;color:#8888aa;margin-bottom:24px}
+  input{
+    width:100%;padding:10px 14px;border-radius:10px;
+    border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.04);color:#e8e8f0;font-size:14px;
+    outline:none;margin-bottom:14px;transition:border-color .15s
+  }
+  input:focus{border-color:rgba(124,185,255,.5);box-shadow:0 0 0 3px rgba(124,185,255,.1)}
+  input::placeholder{color:rgba(255,255,255,.3)}
+  button{
+    width:100%;padding:10px;border-radius:10px;border:none;
+    background:rgba(124,185,255,.15);
+    border:1px solid rgba(124,185,255,.3);color:#7cb9ff;
+    font-size:14px;font-weight:600;cursor:pointer;transition:all .15s
+  }
+  button:hover{background:rgba(124,185,255,.25)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .err{color:#e94560;font-size:12px;margin-top:10px;display:none}
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">H</div>
+  <h1>Hermes</h1>
+  <p class="sub">Multi-User Proxy</p>
+  <form id="login-form">
+    <input type="text" id="username" placeholder="用户名" autocomplete="username" autofocus>
+    <input type="password" id="password" placeholder="密码" autocomplete="current-password">
+    <button type="submit" id="btn">登 录</button>
+  </form>
+  <div class="err" id="err"></div>
+</div>
+<script>
+(function() {
+  var form = document.getElementById('login-form');
+  var usernameInput = document.getElementById('username');
+  var passwordInput = document.getElementById('password');
+  var btn = document.getElementById('btn');
+  var errDiv = document.getElementById('err');
+
+  function showError(msg) {
+    errDiv.textContent = msg;
+    errDiv.style.display = 'block';
+  }
+  function hideError() {
+    errDiv.style.display = 'none';
+  }
+
+  function getNextUrl() {
+    try {
+      var raw = new URL(window.location.href).searchParams.get('next');
+      if (!raw || raw.charAt(0) !== '/') return '/';
+      if (raw.charAt(1) === '/' || raw.charAt(1) === '\\') return '/';
+      return raw;
+    } catch(_) { return '/'; }
+  }
+
+  form.addEventListener('submit', async function(e) {
+    e.preventDefault();
+    hideError();
+
+    var username = usernameInput.value.trim();
+    var password = passwordInput.value;
+    if (!username || !password) {
+      showError('请输入用户名和密码');
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = '登录中...';
+
+    try {
+      var resp = await fetch('/proxy/api/login', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({username: username, password: password}),
+        credentials: 'include',
+      });
+      var data = {};
+      try { data = await resp.json(); } catch(_) {}
+
+      if (resp.ok && data.ok) {
+        window.location.href = getNextUrl();
+      } else {
+        showError(data.error || '登录失败');
+      }
+    } catch(ex) {
+      showError('连接失败，请重试');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '登 录';
+    }
+  });
+})();
+</script>
+</body>
+</html>
