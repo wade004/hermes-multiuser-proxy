@@ -355,6 +355,16 @@ async def handle_request_log(request: web.Request) -> web.Response:
     return web.json_response({"log": log})
 
 
+async def handle_request_stats(request: web.Request) -> web.Response:
+    """Return per-user daily token statistics (admin only)."""
+    if not _is_admin(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    month = request.query.get("month", "")
+    stats = users.get_request_stats(month=month)
+    months = users.get_available_months()
+    return web.json_response({"stats": stats, "available_months": months})
+
+
 # ── Token usage fetcher ─────────────────────────────────────────────────────
 
 async def _fetch_token_usage(client_session: aiohttp.ClientSession, session_id: str) -> None:
@@ -367,9 +377,10 @@ async def _fetch_token_usage(client_session: aiohttp.ClientSession, session_id: 
                 data = await resp.json()
                 inp = int(data.get("input_tokens", 0))
                 out = int(data.get("output_tokens", 0))
+                model = str(data.get("model", ""))
                 if inp > 0 or out > 0:
-                    users.update_request_tokens(session_id, inp, out)
-                    logger.info("TOKENS [%s] in=%d out=%d", session_id, inp, out)
+                    users.update_request_tokens(session_id, inp, out, model)
+                    logger.info("TOKENS [%s] in=%d out=%d model=%s", session_id, inp, out, model)
     except Exception as e:
         logger.debug("Token fetch failed for %s: %s", session_id, e)
 
@@ -443,10 +454,12 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             chat_body = json.loads(body)
             msg = str(chat_body.get("message", "")).strip()
             _chat_session_id = str(chat_body.get("session_id", ""))
+            _chat_model = str(chat_body.get("model", ""))
             if msg:
-                users.record_request(username, msg, _chat_session_id)
+                users.record_request(username, msg, _chat_session_id, model=_chat_model)
                 _chat_logged = True
-                logger.info("CHAT [%s] session=%s msg=%s", username, _chat_session_id, msg[:80])
+                logger.info("CHAT [%s] session=%s model=%s msg=%s",
+                            username, _chat_session_id, _chat_model, msg[:80])
         except Exception:
             pass
 
@@ -603,6 +616,8 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
         return await handle_login_log(request)
     if path == "/proxy/api/request-log" and request.method == "GET":
         return await handle_request_log(request)
+    if path == "/proxy/api/request-stats" and request.method == "GET":
+        return await handle_request_stats(request)
 
     # /proxy/api/users/{username}
     if path.startswith("/proxy/api/users/"):

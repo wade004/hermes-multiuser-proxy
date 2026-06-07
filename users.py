@@ -385,13 +385,16 @@ _req_log_lock = threading.Lock()
 
 
 def record_request(username: str, message: str, session_id: str = "",
-                   input_tokens: int = 0, output_tokens: int = 0) -> None:
+                   input_tokens: int = 0, output_tokens: int = 0,
+                   model: str = "") -> None:
     """Record a chat request to the request log."""
     entry = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": time.strftime("%Y-%m-%d"),
         "username": username,
         "message": (message[:200] + "...") if len(message) > 200 else message,
         "session_id": session_id,
+        "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
     }
@@ -418,7 +421,8 @@ def record_request(username: str, message: str, session_id: str = "",
             logger.warning("Failed to write request log: %s", e)
 
 
-def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int) -> None:
+def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int,
+                           model: str = "") -> None:
     """Update token usage for the most recent request with the given session_id."""
     with _req_log_lock:
         try:
@@ -432,6 +436,8 @@ def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int
                 if entry.get("session_id") == session_id and entry.get("input_tokens", 0) == 0:
                     entry["input_tokens"] = input_tokens
                     entry["output_tokens"] = output_tokens
+                    if model:
+                        entry["model"] = model
                     break
             REQUEST_LOG_FILE.write_text(
                 json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8"
@@ -450,3 +456,108 @@ def get_request_log(limit: int = 50) -> list:
     except Exception:
         pass
     return []
+
+
+def get_request_stats(month: str = "") -> dict:
+    """Return per-user daily token statistics.
+
+    Args:
+        month: filter by month, e.g. "2026-06". Empty = current month.
+
+    Returns:
+        {
+            "month": "2026-06",
+            "days": ["01", "02", ...],           # days with data
+            "users": {
+                "alice": {
+                    "daily": {"01": {"input": 100, "output": 50, "requests": 3, "models": {"gpt-4o": 2, "claude": 1}}, ...},
+                    "total_input": 1000,
+                    "total_output": 500,
+                    "total_requests": 30,
+                },
+                ...
+            },
+            "ranking": [...]  # sorted by total tokens desc
+        }
+    """
+    if not month:
+        month = time.strftime("%Y-%m")
+
+    try:
+        if not REQUEST_LOG_FILE.exists():
+            return {"month": month, "days": [], "users": {}, "ranking": []}
+        log = json.loads(REQUEST_LOG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(log, list):
+            return {"month": month, "days": [], "users": {}, "ranking": []}
+    except Exception:
+        return {"month": month, "days": [], "users": {}, "ranking": []}
+
+    users_data = {}  # username -> {daily: {day: {input, output, requests, models}}, ...}
+    days_set = set()
+
+    for entry in log:
+        date = entry.get("date", entry.get("time", "")[:10])
+        if not date.startswith(month):
+            continue
+        day = date[8:10]  # "DD"
+        username = entry.get("username", "unknown")
+        inp = int(entry.get("input_tokens", 0))
+        out = int(entry.get("output_tokens", 0))
+        model = entry.get("model", "")
+
+        days_set.add(day)
+
+        if username not in users_data:
+            users_data[username] = {"daily": {}, "total_input": 0, "total_output": 0, "total_requests": 0}
+
+        ud = users_data[username]
+        if day not in ud["daily"]:
+            ud["daily"][day] = {"input": 0, "output": 0, "requests": 0, "models": {}}
+
+        dd = ud["daily"][day]
+        dd["input"] += inp
+        dd["output"] += out
+        dd["requests"] += 1
+        if model:
+            dd["models"][model] = dd["models"].get(model, 0) + 1
+
+        ud["total_input"] += inp
+        ud["total_output"] += out
+        ud["total_requests"] += 1
+
+    # Build ranking sorted by total tokens desc
+    ranking = []
+    for username, ud in users_data.items():
+        ranking.append({
+            "username": username,
+            "total_input": ud["total_input"],
+            "total_output": ud["total_output"],
+            "total_tokens": ud["total_input"] + ud["total_output"],
+            "total_requests": ud["total_requests"],
+        })
+    ranking.sort(key=lambda x: x["total_tokens"], reverse=True)
+
+    return {
+        "month": month,
+        "days": sorted(days_set),
+        "users": users_data,
+        "ranking": ranking,
+    }
+
+
+def get_available_months() -> list:
+    """Return list of months that have request log data."""
+    try:
+        if not REQUEST_LOG_FILE.exists():
+            return []
+        log = json.loads(REQUEST_LOG_FILE.read_text(encoding="utf-8"))
+        if not isinstance(log, list):
+            return []
+        months = set()
+        for entry in log:
+            date = entry.get("date", entry.get("time", "")[:10])
+            if len(date) >= 7:
+                months.add(date[:7])
+        return sorted(months, reverse=True)
+    except Exception:
+        return []

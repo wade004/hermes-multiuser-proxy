@@ -149,6 +149,7 @@
     <button class="tab active" data-tab="users">👥 用户管理</button>
     <button class="tab" data-tab="logs">📋 登录日志</button>
     <button class="tab" data-tab="requests">💬 请求日志</button>
+    <button class="tab" data-tab="stats">📊 用量统计</button>
   </div>
 
   <!-- Users Panel -->
@@ -230,6 +231,56 @@
       </table>
     </div>
   </div>
+
+  <!-- Stats Panel -->
+  <div class="tab-panel" id="panel-stats">
+    <div class="card">
+      <div class="table-header">
+        <h2>📊 用量统计</h2>
+        <div style="display:flex;gap:10px;align-items:center">
+          <select id="stats-month" style="padding:6px 10px;border-radius:6px;border:1px solid rgba(255,255,255,.1);background:rgba(255,255,255,.04);color:#e8e8f0;font-size:13px;outline:none">
+            <option value="">加载中...</option>
+          </select>
+          <button class="btn btn-logout" onclick="loadStats()">🔄 刷新</button>
+        </div>
+      </div>
+
+      <!-- Ranking -->
+      <div style="margin-bottom:20px">
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;color:#e8a030">🏆 月度排名</h3>
+        <table>
+          <thead>
+            <tr>
+              <th style="width:40px">排名</th>
+              <th>用户</th>
+              <th>请求数</th>
+              <th>输入 Token</th>
+              <th>输出 Token</th>
+              <th>总计</th>
+            </tr>
+          </thead>
+          <tbody id="ranking-list">
+            <tr><td colspan="6" class="empty">选择月份查看</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Daily Detail -->
+      <div>
+        <h3 style="font-size:14px;font-weight:600;margin-bottom:12px;color:#7cb9ff">📅 每日明细</h3>
+        <div style="overflow-x:auto">
+          <table>
+            <thead id="daily-thead">
+              <tr><th>用户</th></tr>
+            </thead>
+            <tbody id="daily-list">
+              <tr><td class="empty">选择月份查看</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Add/Edit Modal -->
@@ -296,6 +347,7 @@
       document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
       if (tab.dataset.tab === 'logs') loadLogs();
       if (tab.dataset.tab === 'requests') loadRequests();
+      if (tab.dataset.tab === 'stats') loadStats();
     });
   });
 
@@ -527,6 +579,133 @@
       tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败</td></tr>';
     }
   };
+
+  // ── Statistics ──
+  var _statsData = null;
+
+  function formatTokens(n) {
+    if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+    return String(n);
+  }
+
+  window.loadStats = async function() {
+    var monthSelect = document.getElementById('stats-month');
+    var selectedMonth = monthSelect.value;
+    try {
+      var url = '/proxy/api/request-stats';
+      if (selectedMonth) url += '?month=' + encodeURIComponent(selectedMonth);
+      var resp = await fetch(url, {credentials: 'include'});
+      if (resp.status === 403) { window.location.href = '/proxy/login'; return; }
+      var data = await resp.json();
+      _statsData = data.stats;
+
+      // Populate month selector
+      var months = data.available_months || [];
+      var currentVal = monthSelect.value;
+      monthSelect.innerHTML = '';
+      if (months.length === 0) {
+        monthSelect.innerHTML = '<option value="">暂无数据</option>';
+      } else {
+        months.forEach(function(m) {
+          var opt = document.createElement('option');
+          opt.value = m;
+          opt.textContent = m;
+          monthSelect.appendChild(opt);
+        });
+        if (currentVal && months.indexOf(currentVal) >= 0) {
+          monthSelect.value = currentVal;
+        }
+      }
+
+      renderRanking(_statsData.ranking || []);
+      renderDailyDetail(_statsData);
+    } catch(e) {
+      document.getElementById('ranking-list').innerHTML =
+        '<tr><td colspan="6" class="empty">加载失败</td></tr>';
+    }
+  };
+
+  function renderRanking(ranking) {
+    var tbody = document.getElementById('ranking-list');
+    if (ranking.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无数据</td></tr>';
+      return;
+    }
+    var medals = ['🥇', '🥈', '🥉'];
+    tbody.innerHTML = ranking.map(function(r, i) {
+      var medal = i < 3 ? medals[i] : String(i + 1);
+      var total = r.total_input + r.total_output;
+      return '<tr>' +
+        '<td style="text-align:center;font-size:16px">' + medal + '</td>' +
+        '<td><strong>' + escHtml(r.username) + '</strong></td>' +
+        '<td>' + r.total_requests + '</td>' +
+        '<td style="color:#50c878">' + formatTokens(r.total_input) + '</td>' +
+        '<td style="color:#e8a030">' + formatTokens(r.total_output) + '</td>' +
+        '<td><strong>' + formatTokens(total) + '</strong></td>' +
+      '</tr>';
+    }).join('');
+  }
+
+  function renderDailyDetail(stats) {
+    var thead = document.getElementById('daily-thead');
+    var tbody = document.getElementById('daily-list');
+    var days = stats.days || [];
+    var usersData = stats.users || {};
+    var usernames = Object.keys(usersData);
+
+    if (days.length === 0 || usernames.length === 0) {
+      thead.innerHTML = '<tr><th>用户</th></tr>';
+      tbody.innerHTML = '<tr><td class="empty">暂无数据</td></tr>';
+      return;
+    }
+
+    // Build header: User | Day1 | Day2 | ... | Total
+    var headerHtml = '<tr><th style="white-space:nowrap">用户</th>';
+    days.forEach(function(d) {
+      headerHtml += '<th style="text-align:center;white-space:nowrap">' + d + '日</th>';
+    });
+    headerHtml += '<th style="text-align:center">总计</th></tr>';
+    thead.innerHTML = headerHtml;
+
+    // Build rows sorted by total tokens desc
+    var sortedUsers = usernames.slice().sort(function(a, b) {
+      var ta = (usersData[a].total_input || 0) + (usersData[a].total_output || 0);
+      var tb = (usersData[b].total_input || 0) + (usersData[b].total_output || 0);
+      return tb - ta;
+    });
+
+    tbody.innerHTML = sortedUsers.map(function(username) {
+      var ud = usersData[username];
+      var totalAll = ud.total_input + ud.total_output;
+      var row = '<tr><td><strong>' + escHtml(username) + '</strong></td>';
+      days.forEach(function(d) {
+        var dd = ud.daily[d];
+        if (dd) {
+          var dayTotal = dd.input + dd.output;
+          var models = Object.keys(dd.models || {});
+          var modelStr = models.length > 0 ? models.join(', ') : '';
+          row += '<td style="text-align:center;font-size:11px;white-space:nowrap" title="' +
+            escHtml(modelStr) + '">' +
+            '<span style="color:#50c878">' + formatTokens(dd.input) + '</span>' +
+            '<span style="color:#8888aa"> / </span>' +
+            '<span style="color:#e8a030">' + formatTokens(dd.output) + '</span>' +
+            '<br><span style="color:#8888aa;font-size:10px">' + dd.requests + '次</span>' +
+          '</td>';
+        } else {
+          row += '<td style="text-align:center;color:#333">-</td>';
+        }
+      });
+      row += '<td style="text-align:center"><strong>' + formatTokens(totalAll) + '</strong></td>';
+      row += '</tr>';
+      return row;
+    }).join('');
+  }
+
+  // Month selector change
+  document.getElementById('stats-month').addEventListener('change', function() {
+    loadStats();
+  });
 
   // Modal close on overlay click
   document.getElementById('modal').addEventListener('click', function(e) { if(e.target===this) closeModal(); });
