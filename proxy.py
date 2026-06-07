@@ -367,20 +367,35 @@ async def handle_request_stats(request: web.Request) -> web.Response:
 
 # ── Token usage fetcher ─────────────────────────────────────────────────────
 
+# Track last known token count per session to compute deltas
+_session_token_cache = {}  # session_id -> {"input": int, "output": int}
+_token_cache_lock = __import__("threading").Lock()
+
+
 async def _fetch_token_usage(client_session: aiohttp.ClientSession, session_id: str) -> None:
-    """Background task: wait for agent to finish, then fetch token usage."""
+    """Background task: wait for agent to finish, then fetch token usage delta."""
     await asyncio.sleep(30)  # wait for agent to process
     try:
         url = f"{WEBUI_URL}/api/session/usage?session_id={session_id}"
         async with client_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                inp = int(data.get("input_tokens", 0))
-                out = int(data.get("output_tokens", 0))
+                cur_input = int(data.get("input_tokens", 0))
+                cur_output = int(data.get("output_tokens", 0))
                 model = str(data.get("model", ""))
-                if inp > 0 or out > 0:
-                    users.update_request_tokens(session_id, inp, out, model)
-                    logger.info("TOKENS [%s] in=%d out=%d model=%s", session_id, inp, out, model)
+
+                # Compute delta from last known values
+                with _token_cache_lock:
+                    prev = _session_token_cache.get(session_id, {"input": 0, "output": 0})
+                    delta_input = max(0, cur_input - prev["input"])
+                    delta_output = max(0, cur_output - prev["output"])
+                    # Update cache to current values
+                    _session_token_cache[session_id] = {"input": cur_input, "output": cur_output}
+
+                if delta_input > 0 or delta_output > 0:
+                    users.update_request_tokens(session_id, delta_input, delta_output, model)
+                    logger.info("TOKENS [%s] delta_in=%d delta_out=%d total_in=%d total_out=%d model=%s",
+                                session_id, delta_input, delta_output, cur_input, cur_output, model)
     except Exception as e:
         logger.debug("Token fetch failed for %s: %s", session_id, e)
 
