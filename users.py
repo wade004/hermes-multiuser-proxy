@@ -24,6 +24,7 @@ logger = logging.getLogger("users")
 
 USERS_FILE = DATA_DIR / "proxy_users.json"
 SESSIONS_FILE = DATA_DIR / "proxy_sessions.json"
+LOGIN_LOG_FILE = DATA_DIR / "proxy_login_log.json"
 
 # PBKDF2 settings
 PBKDF2_ITERATIONS = 600_000
@@ -327,3 +328,52 @@ def record_login_attempt(ip: str) -> None:
 def clear_rate_limit(ip: str) -> None:
     with _attempts_lock:
         _login_attempts.pop(ip, None)
+
+
+# ── Login audit log ────────────────────────────────────────────────────────
+
+_login_log_lock = threading.Lock()
+
+
+def record_login(username: str, ip: str, user_agent: str = "", success: bool = True) -> None:
+    """Record a login event (success or failure) to the audit log."""
+    entry = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "username": username,
+        "ip": ip,
+        "user_agent": user_agent,
+        "success": success,
+    }
+    with _login_log_lock:
+        try:
+            log = []
+            if LOGIN_LOG_FILE.exists():
+                log = json.loads(LOGIN_LOG_FILE.read_text(encoding="utf-8"))
+                if not isinstance(log, list):
+                    log = []
+        except Exception:
+            log = []
+        log.append(entry)
+        # Keep last 1000 entries
+        if len(log) > 1000:
+            log = log[-1000:]
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            LOGIN_LOG_FILE.write_text(
+                json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+            LOGIN_LOG_FILE.chmod(0o600)
+        except Exception as e:
+            logger.warning("Failed to write login log: %s", e)
+
+
+def get_login_log(limit: int = 50) -> list:
+    """Return the most recent login log entries."""
+    try:
+        if LOGIN_LOG_FILE.exists():
+            log = json.loads(LOGIN_LOG_FILE.read_text(encoding="utf-8"))
+            if isinstance(log, list):
+                return log[-limit:]
+    except Exception:
+        pass
+    return []

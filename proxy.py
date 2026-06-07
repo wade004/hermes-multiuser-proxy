@@ -178,12 +178,15 @@ async def handle_login_api(request: web.Request) -> web.Response:
         )
 
     users.record_login_attempt(ip)
+    ua = request.headers.get("User-Agent", "")
     user_info = users.authenticate(username, password)
 
     if not user_info:
+        users.record_login(username, ip, ua, success=False)
         return web.json_response({"ok": False, "error": "Invalid credentials"}, status=401)
 
     users.clear_rate_limit(ip)
+    users.record_login(username, ip, ua, success=True)
 
     # Create session
     token = users.create_session(username)
@@ -313,6 +316,16 @@ async def handle_users_update(request: web.Request) -> web.Response:
     if users.update_user(username, **kwargs):
         return web.json_response({"ok": True})
     return web.json_response({"error": "user not found"}, status=404)
+
+
+async def handle_login_log(request: web.Request) -> web.Response:
+    """Return recent login log entries (admin only)."""
+    if not _is_admin(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    limit = int(request.query.get("limit", "50"))
+    limit = min(limit, 200)
+    log = users.get_login_log(limit=limit)
+    return web.json_response({"log": log})
 
 
 # ── Reverse proxy ───────────────────────────────────────────────────────────
@@ -518,6 +531,8 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
         return await handle_users_list(request)
     if path == "/proxy/api/users" and request.method == "POST":
         return await handle_users_create(request)
+    if path == "/proxy/api/login-log" and request.method == "GET":
+        return await handle_login_log(request)
 
     # /proxy/api/users/{username}
     if path.startswith("/proxy/api/users/"):
