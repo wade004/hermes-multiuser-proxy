@@ -222,7 +222,7 @@
             <th>时间</th>
             <th>用户</th>
             <th>请求内容</th>
-            <th>Token (入/出)</th>
+            <th>实际 Token (入/出)</th><th>缓存命中</th><th>模型</th>
           </tr>
         </thead>
         <tbody id="req-list">
@@ -256,11 +256,12 @@
               <th>请求数</th>
               <th>输入 Token</th>
               <th>输出 Token</th>
-              <th>总计</th>
+              <th>缓存命中</th>
+              <th>实际总计</th>
             </tr>
           </thead>
           <tbody id="ranking-list">
-            <tr><td colspan="6" class="empty">选择月份查看</td></tr>
+            <tr><td colspan="7" class="empty">选择月份查看</td></tr>
           </tbody>
         </table>
       </div>
@@ -565,14 +566,21 @@
       tbody.innerHTML = log.map(function(e) {
         var inp = e.input_tokens || 0;
         var out = e.output_tokens || 0;
+        var cacheR = e.cache_read_tokens || 0;
+        var model = e.model || '';
         var tokenText = (inp > 0 || out > 0)
           ? '<span style="color:#50c878">' + inp.toLocaleString() + '</span> / <span style="color:#e8a030">' + out.toLocaleString() + '</span>'
+          : '<span style="color:#8888aa">-</span>';
+        var cacheText = cacheR > 0
+          ? '<span style="color:#4DD0E1" title="缓存读取">' + formatTokens(cacheR) + '</span>'
           : '<span style="color:#8888aa">-</span>';
         return '<tr>' +
           '<td style="font-size:12px;color:#8888aa;white-space:nowrap">' + escHtml(e.time) + '</td>' +
           '<td><strong>' + escHtml(e.username) + '</strong></td>' +
-          '<td style="font-size:12px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(e.message) + '">' + escHtml(e.message) + '</td>' +
+          '<td style="font-size:12px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(e.message) + '">' + escHtml(e.message) + '</td>' +
           '<td style="font-size:12px;white-space:nowrap">' + tokenText + '</td>' +
+          '<td style="font-size:12px;white-space:nowrap">' + cacheText + '</td>' +
+          '<td style="font-size:11px;color:#8888aa;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(model) + '">' + escHtml(model) + '</td>' +
         '</tr>';
       }).join('');
     } catch(e) {
@@ -629,20 +637,22 @@
   function renderRanking(ranking) {
     var tbody = document.getElementById('ranking-list');
     if (ranking.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="6" class="empty">暂无数据</td></tr>';
+      tbody.innerHTML = '<tr><td colspan="7" class="empty">暂无数据</td></tr>';
       return;
     }
     var medals = ['🥇', '🥈', '🥉'];
     tbody.innerHTML = ranking.map(function(r, i) {
       var medal = i < 3 ? medals[i] : String(i + 1);
-      var total = r.total_input + r.total_output;
+      var realTotal = r.total_real_tokens || (r.total_input + r.total_output);
+      var cacheR = r.total_cache_read || 0;
       return '<tr>' +
         '<td style="text-align:center;font-size:16px">' + medal + '</td>' +
         '<td><strong>' + escHtml(r.username) + '</strong></td>' +
         '<td>' + r.total_requests + '</td>' +
         '<td style="color:#50c878">' + formatTokens(r.total_input) + '</td>' +
         '<td style="color:#e8a030">' + formatTokens(r.total_output) + '</td>' +
-        '<td><strong>' + formatTokens(total) + '</strong></td>' +
+        '<td style="color:#4DD0E1">' + (cacheR > 0 ? formatTokens(cacheR) : '-') + '</td>' +
+        '<td><strong>' + formatTokens(realTotal) + '</strong></td>' +
       '</tr>';
     }).join('');
   }
@@ -677,26 +687,40 @@
 
     tbody.innerHTML = sortedUsers.map(function(username) {
       var ud = usersData[username];
-      var totalAll = ud.total_input + ud.total_output;
+      var totalAll = (ud.total_input || 0) + (ud.total_output || 0);
+      var totalCache = ud.total_cache_read || 0;
       var row = '<tr><td><strong>' + escHtml(username) + '</strong></td>';
       days.forEach(function(d) {
         var dd = ud.daily[d];
         if (dd) {
-          var dayTotal = dd.input + dd.output;
           var models = Object.keys(dd.models || {});
           var modelStr = models.length > 0 ? models.join(', ') : '';
+          var cacheR = dd.cache_read || 0;
+          var tip = '入: ' + dd.input + ' 出: ' + dd.output;
+          if (cacheR > 0) tip += ' 缓存: ' + cacheR;
+          if (modelStr) tip += ' 模型: ' + modelStr;
           row += '<td style="text-align:center;font-size:11px;white-space:nowrap" title="' +
-            escHtml(modelStr) + '">' +
+            escHtml(tip) + '">' +
             '<span style="color:#50c878">' + formatTokens(dd.input) + '</span>' +
             '<span style="color:#8888aa"> / </span>' +
-            '<span style="color:#e8a030">' + formatTokens(dd.output) + '</span>' +
-            '<br><span style="color:#8888aa;font-size:10px">' + dd.requests + '次</span>' +
-          '</td>';
+            '<span style="color:#e8a030">' + formatTokens(dd.output) + '</span>';
+          if (cacheR > 0) {
+            row += '<br><span style="color:#4DD0E1;font-size:10px">缓存 ' + formatTokens(cacheR) + '</span>';
+          } else {
+            row += '<br><span style="color:#8888aa;font-size:10px">' + dd.requests + '次</span>';
+          }
+          row += '</td>';
         } else {
           row += '<td style="text-align:center;color:#333">-</td>';
         }
       });
-      row += '<td style="text-align:center"><strong>' + formatTokens(totalAll) + '</strong></td>';
+      var totalTitle = '实际: ' + totalAll;
+      if (totalCache > 0) totalTitle += ' 缓存: ' + totalCache;
+      row += '<td style="text-align:center" title="' + totalTitle + '"><strong>' + formatTokens(totalAll) + '</strong>';
+      if (totalCache > 0) {
+        row += '<br><span style="color:#4DD0E1;font-size:10px">缓存 ' + formatTokens(totalCache) + '</span>';
+      }
+      row += '</td>';
       row += '</tr>';
       return row;
     }).join('');

@@ -368,34 +368,83 @@ async def handle_request_stats(request: web.Request) -> web.Response:
 # ── Token usage fetcher ─────────────────────────────────────────────────────
 
 # Track last known token count per session to compute deltas
-_session_token_cache = {}  # session_id -> {"input": int, "output": int}
+_session_token_cache = {}  # session_id -> {"input": int, "output": int, "cache_read": int, "cache_write": int, "reasoning": int}
 _token_cache_lock = __import__("threading").Lock()
 
 
-async def _fetch_token_usage(client_session: aiohttp.ClientSession, session_id: str) -> None:
+def _query_session_tokens(session_id: str, profile: str) -> dict | None:
+    """Query session token data directly from the profile's state.db."""
+    import sqlite3
+    hermes_home = Path(os.path.expanduser("~/.hermes"))
+    # Try profile-specific db first, then default
+    for db_path in [
+        hermes_home / "profiles" / profile / "state.db",
+        hermes_home / "state.db",
+    ]:
+        if not db_path.exists():
+            continue
+        try:
+            conn = sqlite3.connect(str(db_path), timeout=5)
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, "
+                "reasoning_tokens, model FROM sessions WHERE id = ?",
+                (session_id,)
+            )
+            row = cur.fetchone()
+            conn.close()
+            if row:
+                return {
+                    "input": int(row[0] or 0),
+                    "output": int(row[1] or 0),
+                    "cache_read": int(row[2] or 0),
+                    "cache_write": int(row[3] or 0),
+                    "reasoning": int(row[4] or 0),
+                    "model": str(row[5] or ""),
+                }
+        except Exception:
+            pass
+    return None
+
+
+async def _fetch_token_usage(client_session: aiohttp.ClientSession,
+                              session_id: str, profile: str) -> None:
     """Background task: wait for agent to finish, then fetch token usage delta."""
     await asyncio.sleep(30)  # wait for agent to process
     try:
-        url = f"{WEBUI_URL}/api/session/usage?session_id={session_id}"
-        async with client_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                cur_input = int(data.get("input_tokens", 0))
-                cur_output = int(data.get("output_tokens", 0))
-                model = str(data.get("model", ""))
+        data = await asyncio.get_event_loop().run_in_executor(
+            None, _query_session_tokens, session_id, profile
+        )
+        if not data:
+            return
 
-                # Compute delta from last known values
-                with _token_cache_lock:
-                    prev = _session_token_cache.get(session_id, {"input": 0, "output": 0})
-                    delta_input = max(0, cur_input - prev["input"])
-                    delta_output = max(0, cur_output - prev["output"])
-                    # Update cache to current values
-                    _session_token_cache[session_id] = {"input": cur_input, "output": cur_output}
+        cur = data
+        with _token_cache_lock:
+            prev = _session_token_cache.get(session_id)
+            if prev is None:
+                # First time seeing this session — initialize baseline (delta = 0)
+                _session_token_cache[session_id] = dict(cur)
+                logger.info("TOKENS [%s] baseline set: in=%d out=%d cache_r=%d cache_w=%d model=%s",
+                            session_id, cur["input"], cur["output"],
+                            cur["cache_read"], cur["cache_write"], cur["model"])
+                return
 
-                if delta_input > 0 or delta_output > 0:
-                    users.update_request_tokens(session_id, delta_input, delta_output, model)
-                    logger.info("TOKENS [%s] delta_in=%d delta_out=%d total_in=%d total_out=%d model=%s",
-                                session_id, delta_input, delta_output, cur_input, cur_output, model)
+            delta_input = max(0, cur["input"] - prev["input"])
+            delta_output = max(0, cur["output"] - prev["output"])
+            delta_cache_read = max(0, cur["cache_read"] - prev["cache_read"])
+            delta_cache_write = max(0, cur["cache_write"] - prev["cache_write"])
+            delta_reasoning = max(0, cur["reasoning"] - prev["reasoning"])
+            _session_token_cache[session_id] = dict(cur)
+
+        if delta_input > 0 or delta_output > 0 or delta_cache_read > 0:
+            users.update_request_tokens(
+                session_id, delta_input, delta_output,
+                delta_cache_read, delta_cache_write, delta_reasoning,
+                cur["model"]
+            )
+            logger.info("TOKENS [%s] in=%d out=%d cache_r=%d cache_w=%d model=%s",
+                        session_id, delta_input, delta_output,
+                        delta_cache_read, delta_cache_write, cur["model"])
     except Exception as e:
         logger.debug("Token fetch failed for %s: %s", session_id, e)
 
@@ -479,9 +528,9 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             pass
 
     # After forwarding, schedule token usage fetch for chat requests
-    if _chat_logged and _chat_session_id:
+    if _chat_logged and _chat_session_id and user_info:
         asyncio.create_task(
-            _fetch_token_usage(request.app["client_session"], _chat_session_id)
+            _fetch_token_usage(request.app["client_session"], _chat_session_id, user_info["profile"])
         )
 
     # Handle WebSocket upgrade BEFORE making HTTP request

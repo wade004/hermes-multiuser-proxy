@@ -386,7 +386,8 @@ _req_log_lock = threading.Lock()
 
 def record_request(username: str, message: str, session_id: str = "",
                    input_tokens: int = 0, output_tokens: int = 0,
-                   model: str = "") -> None:
+                   cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+                   reasoning_tokens: int = 0, model: str = "") -> None:
     """Record a chat request to the request log."""
     entry = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -397,6 +398,9 @@ def record_request(username: str, message: str, session_id: str = "",
         "model": model,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+        "reasoning_tokens": reasoning_tokens,
     }
     with _req_log_lock:
         try:
@@ -422,7 +426,8 @@ def record_request(username: str, message: str, session_id: str = "",
 
 
 def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int,
-                           model: str = "") -> None:
+                           cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+                           reasoning_tokens: int = 0, model: str = "") -> None:
     """Update token usage for the most recent request with the given session_id."""
     with _req_log_lock:
         try:
@@ -436,6 +441,9 @@ def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int
                 if entry.get("session_id") == session_id and entry.get("input_tokens", 0) == 0:
                     entry["input_tokens"] = input_tokens
                     entry["output_tokens"] = output_tokens
+                    entry["cache_read_tokens"] = cache_read_tokens
+                    entry["cache_write_tokens"] = cache_write_tokens
+                    entry["reasoning_tokens"] = reasoning_tokens
                     if model:
                         entry["model"] = model
                     break
@@ -459,27 +467,7 @@ def get_request_log(limit: int = 50) -> list:
 
 
 def get_request_stats(month: str = "") -> dict:
-    """Return per-user daily token statistics.
-
-    Args:
-        month: filter by month, e.g. "2026-06". Empty = current month.
-
-    Returns:
-        {
-            "month": "2026-06",
-            "days": ["01", "02", ...],           # days with data
-            "users": {
-                "alice": {
-                    "daily": {"01": {"input": 100, "output": 50, "requests": 3, "models": {"gpt-4o": 2, "claude": 1}}, ...},
-                    "total_input": 1000,
-                    "total_output": 500,
-                    "total_requests": 30,
-                },
-                ...
-            },
-            "ranking": [...]  # sorted by total tokens desc
-        }
-    """
+    """Return per-user daily token statistics including cache info."""
     if not month:
         month = time.strftime("%Y-%m")
 
@@ -492,50 +480,69 @@ def get_request_stats(month: str = "") -> dict:
     except Exception:
         return {"month": month, "days": [], "users": {}, "ranking": []}
 
-    users_data = {}  # username -> {daily: {day: {input, output, requests, models}}, ...}
+    users_data = {}
     days_set = set()
 
     for entry in log:
         date = entry.get("date", entry.get("time", "")[:10])
         if not date.startswith(month):
             continue
-        day = date[8:10]  # "DD"
+        day = date[8:10]
         username = entry.get("username", "unknown")
         inp = int(entry.get("input_tokens", 0))
         out = int(entry.get("output_tokens", 0))
+        cache_read = int(entry.get("cache_read_tokens", 0))
+        cache_write = int(entry.get("cache_write_tokens", 0))
+        reasoning = int(entry.get("reasoning_tokens", 0))
         model = entry.get("model", "")
 
         days_set.add(day)
 
         if username not in users_data:
-            users_data[username] = {"daily": {}, "total_input": 0, "total_output": 0, "total_requests": 0}
+            users_data[username] = {
+                "daily": {}, "total_input": 0, "total_output": 0,
+                "total_cache_read": 0, "total_cache_write": 0,
+                "total_reasoning": 0, "total_requests": 0,
+            }
 
         ud = users_data[username]
         if day not in ud["daily"]:
-            ud["daily"][day] = {"input": 0, "output": 0, "requests": 0, "models": {}}
+            ud["daily"][day] = {
+                "input": 0, "output": 0, "cache_read": 0, "cache_write": 0,
+                "reasoning": 0, "requests": 0, "models": {},
+            }
 
         dd = ud["daily"][day]
         dd["input"] += inp
         dd["output"] += out
+        dd["cache_read"] += cache_read
+        dd["cache_write"] += cache_write
+        dd["reasoning"] += reasoning
         dd["requests"] += 1
         if model:
             dd["models"][model] = dd["models"].get(model, 0) + 1
 
         ud["total_input"] += inp
         ud["total_output"] += out
+        ud["total_cache_read"] += cache_read
+        ud["total_cache_write"] += cache_write
+        ud["total_reasoning"] += reasoning
         ud["total_requests"] += 1
 
-    # Build ranking sorted by total tokens desc
+    # Build ranking sorted by real tokens (input + output, excluding cache) desc
     ranking = []
     for username, ud in users_data.items():
         ranking.append({
             "username": username,
             "total_input": ud["total_input"],
             "total_output": ud["total_output"],
-            "total_tokens": ud["total_input"] + ud["total_output"],
+            "total_cache_read": ud["total_cache_read"],
+            "total_cache_write": ud["total_cache_write"],
+            "total_reasoning": ud["total_reasoning"],
+            "total_real_tokens": ud["total_input"] + ud["total_output"],
             "total_requests": ud["total_requests"],
         })
-    ranking.sort(key=lambda x: x["total_tokens"], reverse=True)
+    ranking.sort(key=lambda x: x["total_real_tokens"], reverse=True)
 
     return {
         "month": month,
