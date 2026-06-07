@@ -4,6 +4,7 @@ Sits in front of hermes-webui, handles per-user authentication,
 and auto-binds Hermes profiles on login.
 """
 import asyncio
+import json
 import logging
 import os
 from pathlib import Path
@@ -327,6 +328,35 @@ async def handle_login_log(request: web.Request) -> web.Response:
     return web.json_response({"log": log})
 
 
+async def handle_request_log(request: web.Request) -> web.Response:
+    """Return recent request log entries (admin only)."""
+    if not _is_admin(request):
+        return web.json_response({"error": "forbidden"}, status=403)
+    limit = int(request.query.get("limit", "50"))
+    limit = min(limit, 500)
+    log = users.get_request_log(limit=limit)
+    return web.json_response({"log": log})
+
+
+# ── Token usage fetcher ─────────────────────────────────────────────────────
+
+async def _fetch_token_usage(client_session: aiohttp.ClientSession, session_id: str) -> None:
+    """Background task: wait for agent to finish, then fetch token usage."""
+    await asyncio.sleep(30)  # wait for agent to process
+    try:
+        url = f"{WEBUI_URL}/api/session/usage?session_id={session_id}"
+        async with client_session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                inp = int(data.get("input_tokens", 0))
+                out = int(data.get("output_tokens", 0))
+                if inp > 0 or out > 0:
+                    users.update_request_tokens(session_id, inp, out)
+                    logger.info("TOKENS [%s] in=%d out=%d", session_id, inp, out)
+    except Exception as e:
+        logger.debug("Token fetch failed for %s: %s", session_id, e)
+
+
 # ── Reverse proxy ───────────────────────────────────────────────────────────
 
 # Paths to intercept (our own routes, not forwarded to webui)
@@ -386,6 +416,28 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
 
     # Read request body (not needed for WebSocket or GET)
     body = await request.read() if request.method in ("POST", "PUT", "PATCH") else None
+
+    # ── Chat request logging ──
+    # Intercept POST /api/chat/start to log user requests
+    _chat_logged = False
+    _chat_session_id = ""
+    if request.method == "POST" and request.path == "/api/chat/start" and body:
+        try:
+            chat_body = json.loads(body)
+            msg = str(chat_body.get("message", "")).strip()
+            _chat_session_id = str(chat_body.get("session_id", ""))
+            if msg:
+                users.record_request(username, msg, _chat_session_id)
+                _chat_logged = True
+                logger.info("CHAT [%s] session=%s msg=%s", username, _chat_session_id, msg[:80])
+        except Exception:
+            pass
+
+    # After forwarding, schedule token usage fetch for chat requests
+    if _chat_logged and _chat_session_id:
+        asyncio.create_task(
+            _fetch_token_usage(request.app["client_session"], _chat_session_id)
+        )
 
     # Handle WebSocket upgrade BEFORE making HTTP request
     if _is_websocket_upgrade(request):
@@ -532,6 +584,8 @@ async def _intercept(request: web.Request) -> web.StreamResponse | None:
         return await handle_users_create(request)
     if path == "/proxy/api/login-log" and request.method == "GET":
         return await handle_login_log(request)
+    if path == "/proxy/api/request-log" and request.method == "GET":
+        return await handle_request_log(request)
 
     # /proxy/api/users/{username}
     if path.startswith("/proxy/api/users/"):

@@ -25,6 +25,7 @@ logger = logging.getLogger("users")
 USERS_FILE = DATA_DIR / "proxy_users.json"
 SESSIONS_FILE = DATA_DIR / "proxy_sessions.json"
 LOGIN_LOG_FILE = DATA_DIR / "proxy_login_log.json"
+REQUEST_LOG_FILE = DATA_DIR / "proxy_request_log.json"
 
 # PBKDF2 settings
 PBKDF2_ITERATIONS = 600_000
@@ -371,6 +372,79 @@ def get_login_log(limit: int = 50) -> list:
     try:
         if LOGIN_LOG_FILE.exists():
             log = json.loads(LOGIN_LOG_FILE.read_text(encoding="utf-8"))
+            if isinstance(log, list):
+                return log[-limit:]
+    except Exception:
+        pass
+    return []
+
+
+# ── Request log ────────────────────────────────────────────────────────────
+
+_req_log_lock = threading.Lock()
+
+
+def record_request(username: str, message: str, session_id: str = "",
+                   input_tokens: int = 0, output_tokens: int = 0) -> None:
+    """Record a chat request to the request log."""
+    entry = {
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "username": username,
+        "message": (message[:200] + "...") if len(message) > 200 else message,
+        "session_id": session_id,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+    }
+    with _req_log_lock:
+        try:
+            log = []
+            if REQUEST_LOG_FILE.exists():
+                log = json.loads(REQUEST_LOG_FILE.read_text(encoding="utf-8"))
+                if not isinstance(log, list):
+                    log = []
+        except Exception:
+            log = []
+        log.append(entry)
+        # Keep last 2000 entries
+        if len(log) > 2000:
+            log = log[-2000:]
+        try:
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            REQUEST_LOG_FILE.write_text(
+                json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+            REQUEST_LOG_FILE.chmod(0o600)
+        except Exception as e:
+            logger.warning("Failed to write request log: %s", e)
+
+
+def update_request_tokens(session_id: str, input_tokens: int, output_tokens: int) -> None:
+    """Update token usage for the most recent request with the given session_id."""
+    with _req_log_lock:
+        try:
+            if not REQUEST_LOG_FILE.exists():
+                return
+            log = json.loads(REQUEST_LOG_FILE.read_text(encoding="utf-8"))
+            if not isinstance(log, list):
+                return
+            # Find the most recent entry with this session_id and no tokens
+            for entry in reversed(log):
+                if entry.get("session_id") == session_id and entry.get("input_tokens", 0) == 0:
+                    entry["input_tokens"] = input_tokens
+                    entry["output_tokens"] = output_tokens
+                    break
+            REQUEST_LOG_FILE.write_text(
+                json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.warning("Failed to update request tokens: %s", e)
+
+
+def get_request_log(limit: int = 50) -> list:
+    """Return the most recent request log entries."""
+    try:
+        if REQUEST_LOG_FILE.exists():
+            log = json.loads(REQUEST_LOG_FILE.read_text(encoding="utf-8"))
             if isinstance(log, list):
                 return log[-limit:]
     except Exception:

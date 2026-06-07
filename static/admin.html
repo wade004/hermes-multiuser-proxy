@@ -148,6 +148,7 @@
   <div class="tabs">
     <button class="tab active" data-tab="users">👥 用户管理</button>
     <button class="tab" data-tab="logs">📋 登录日志</button>
+    <button class="tab" data-tab="requests">💬 请求日志</button>
   </div>
 
   <!-- Users Panel -->
@@ -198,6 +199,32 @@
           </tr>
         </thead>
         <tbody id="log-list">
+          <tr><td colspan="4" class="empty">加载中...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Requests Panel -->
+  <div class="tab-panel" id="panel-requests">
+    <div class="card">
+      <div class="table-header">
+        <h2>请求日志</h2>
+        <div style="display:flex;gap:10px;align-items:center">
+          <span id="req-count" style="font-size:12px;color:#8888aa"></span>
+          <button class="btn btn-logout" onclick="loadRequests()">🔄 刷新</button>
+        </div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>时间</th>
+            <th>用户</th>
+            <th>请求内容</th>
+            <th>Token (入/出)</th>
+          </tr>
+        </thead>
+        <tbody id="req-list">
           <tr><td colspan="4" class="empty">加载中...</td></tr>
         </tbody>
       </table>
@@ -268,6 +295,7 @@
       tab.classList.add('active');
       document.getElementById('panel-' + tab.dataset.tab).classList.add('active');
       if (tab.dataset.tab === 'logs') loadLogs();
+      if (tab.dataset.tab === 'requests') loadRequests();
     });
   });
 
@@ -461,6 +489,38 @@
           '<td><strong>' + escHtml(e.username) + '</strong></td>' +
           '<td style="font-size:12px;color:#7cb9ff">' + escHtml(e.ip) + '</td>' +
           '<td class="ua-cell" title="' + escHtml(e.user_agent) + '">' + escHtml(parseUA(e.user_agent)) + '</td>' +
+        '</tr>';
+      }).join('');
+    } catch(e) {
+      tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败</td></tr>';
+    }
+  };
+
+  // ── Request Logs ──
+  window.loadRequests = async function() {
+    var tbody = document.getElementById('req-list');
+    tbody.innerHTML = '<tr><td colspan="4" class="empty">加载中...</td></tr>';
+    try {
+      var resp = await fetch('/proxy/api/request-log?limit=200', {credentials:'include'});
+      if (resp.status === 403) { window.location.href = '/proxy/login'; return; }
+      var data = await resp.json();
+      var log = (data.log || []).reverse(); // newest first
+      document.getElementById('req-count').textContent = '共 ' + log.length + ' 条记录';
+      if (log.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无请求记录</td></tr>';
+        return;
+      }
+      tbody.innerHTML = log.map(function(e) {
+        var inp = e.input_tokens || 0;
+        var out = e.output_tokens || 0;
+        var tokenText = (inp > 0 || out > 0)
+          ? '<span style="color:#50c878">' + inp.toLocaleString() + '</span> / <span style="color:#e8a030">' + out.toLocaleString() + '</span>'
+          : '<span style="color:#8888aa">-</span>';
+        return '<tr>' +
+          '<td style="font-size:12px;color:#8888aa;white-space:nowrap">' + escHtml(e.time) + '</td>' +
+          '<td><strong>' + escHtml(e.username) + '</strong></td>' +
+          '<td style="font-size:12px;max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(e.message) + '">' + escHtml(e.message) + '</td>' +
+          '<td style="font-size:12px;white-space:nowrap">' + tokenText + '</td>' +
         '</tr>';
       }).join('');
     } catch(e) {
