@@ -182,11 +182,10 @@ async def handle_login_api(request: web.Request) -> web.Response:
     user_info = users.authenticate(username, password)
 
     if not user_info:
-        users.record_login(username, ip, ua, success=False)
         return web.json_response({"ok": False, "error": "Invalid credentials"}, status=401)
 
     users.clear_rate_limit(ip)
-    users.record_login(username, ip, ua, success=True)
+    users.record_login(username, ip, ua)
 
     # Create session
     token = users.create_session(username)

@@ -335,14 +335,13 @@ def clear_rate_limit(ip: str) -> None:
 _login_log_lock = threading.Lock()
 
 
-def record_login(username: str, ip: str, user_agent: str = "", success: bool = True) -> None:
-    """Record a login event (success or failure) to the audit log."""
+def record_login(username: str, ip: str, user_agent: str = "") -> None:
+    """Record a successful login event to the audit log."""
     entry = {
         "time": time.strftime("%Y-%m-%d %H:%M:%S"),
         "username": username,
         "ip": ip,
         "user_agent": user_agent,
-        "success": success,
     }
     with _login_log_lock:
         try:
