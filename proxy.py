@@ -247,8 +247,25 @@ async def handle_health(request: web.Request) -> web.Response:
 
 async def handle_admin_page(request: web.Request) -> web.Response:
     """Serve the admin user management page (admin only)."""
-    if not _is_admin(request):
+    # Check authentication first
+    username = _get_authenticated_user(request)
+    if not username:
         raise web.HTTPFound("/proxy/login?next=/proxy/admin")
+    # Check admin role
+    user = users.get_user(username)
+    if not user or user["role"] != "admin":
+        return web.Response(
+            text="""<!DOCTYPE html><html><head><meta charset="utf-8">
+            <title>403 Forbidden</title>
+            <style>body{background:#1a1a2e;color:#e8e8f0;font-family:sans-serif;
+            display:flex;align-items:center;justify-content:center;height:100vh}
+            .box{text-align:center}h1{font-size:48px;color:#e94560;margin-bottom:8px}
+            p{color:#8888aa}a{color:#7cb9ff;text-decoration:none}</style></head>
+            <body><div class="box"><h1>403</h1><p>权限不足，仅管理员可访问</p>
+            <p><a href="/">← 返回首页</a></p></div></body></html>""",
+            status=403,
+            content_type="text/html",
+        )
     html = (STATIC_DIR / "admin.html").read_text(encoding="utf-8")
     return web.Response(text=html, content_type="text/html")
 
