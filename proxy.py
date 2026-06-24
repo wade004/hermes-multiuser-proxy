@@ -145,6 +145,31 @@ def _is_admin(request: web.Request) -> bool:
     return user is not None and user["role"] == "admin"
 
 
+def _resolve_external_host(request: web.Request) -> None:
+    """Resolve the external-facing host from nginx reverse-proxy headers.
+
+    When the proxy sits behind nginx, ``request.headers.get('Host')`` may
+    be an internal IP (e.g. ``18.232.242.223:8787``). This function tries
+    ``X-Forwarded-Host``, ``Origin``, and ``Referer`` headers to discover
+    the real domain, and patches ``request._external_host`` for downstream
+    use in cookie domain and ``X-Forwarded-Host`` forwarding.
+    """
+    import re as _re
+    for header in ('X-Forwarded-Host', 'Origin', 'Referer'):
+        val = request.headers.get(header, '')
+        m = _re.match(r'https?://([^/:]+)(:\d+)?', val)
+        if m:
+            request._external_host = m.group(1)
+            return
+    # Fall back to Host header
+    host = request.headers.get('Host', '')
+    m = _re.match(r'([^:]+)', host)
+    if m:
+        request._external_host = m.group(1)
+    else:
+        request._external_host = host or 'localhost'
+
+
 # ── Login page & API ────────────────────────────────────────────────────────
 
 async def handle_login_page(request: web.Request) -> web.Response:
@@ -199,6 +224,10 @@ async def handle_login_api(request: web.Request) -> web.Response:
         "profile": user_info["profile"],
     })
 
+    # Resolve external domain for cookie scope
+    _resolve_external_host(request)
+    cookie_domain = getattr(request, '_external_host', None)
+
     # Set session cookie
     resp.set_cookie(
         SESSION_COOKIE,
@@ -207,18 +236,21 @@ async def handle_login_api(request: web.Request) -> web.Response:
         httponly=True,
         samesite="Lax",
         path="/",
+        domain=cookie_domain,
     )
 
     # Set profile cookie so hermes-webui auto-binds the user's profile
-    if user_info["role"] != "admin":
-        resp.set_cookie(
-            PROFILE_COOKIE,
-            user_info["profile"],
-            max_age=users.SESSION_TTL,
-            httponly=True,
-            samesite="Lax",
-            path="/",
-        )
+    # Admin users also need the cookie — the proxy enforces it on every request,
+    # and the webui won't create sessions without it.
+    resp.set_cookie(
+        PROFILE_COOKIE,
+        user_info["profile"],
+        max_age=users.SESSION_TTL,
+        httponly=True,
+        samesite="Lax",
+        path="/",
+        domain=cookie_domain,
+    )
 
     return resp
 
@@ -341,8 +373,9 @@ async def handle_login_log(request: web.Request) -> web.Response:
         return web.json_response({"error": "forbidden"}, status=403)
     limit = int(request.query.get("limit", "50"))
     limit = min(limit, 200)
-    log = users.get_login_log(limit=limit)
-    return web.json_response({"log": log})
+    offset = max(int(request.query.get("offset", "0")), 0)
+    result = users.get_login_log(limit=limit, offset=offset)
+    return web.json_response(result)
 
 
 async def handle_request_log(request: web.Request) -> web.Response:
@@ -351,8 +384,9 @@ async def handle_request_log(request: web.Request) -> web.Response:
         return web.json_response({"error": "forbidden"}, status=403)
     limit = int(request.query.get("limit", "50"))
     limit = min(limit, 500)
-    log = users.get_request_log(limit=limit)
-    return web.json_response({"log": log})
+    offset = max(int(request.query.get("offset", "0")), 0)
+    result = users.get_request_log(limit=limit, offset=offset)
+    return web.json_response(result)
 
 
 async def handle_request_stats(request: web.Request) -> web.Response:
@@ -468,6 +502,11 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
             return web.json_response({"error": "unauthorized"}, status=401)
         raise web.HTTPFound(f"/proxy/login?next={request.path}")
 
+    # Resolve the external-facing domain from available headers.
+    # When behind nginx, Host may be an internal IP; try X-Forwarded-Host,
+    # Origin, and Referer to discover the real domain.
+    _resolve_external_host(request)
+    
     # Build upstream URL
     path = request.path
     if request.query_string:
@@ -484,7 +523,8 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
         headers[key] = val
 
     # Set X-Forwarded-Host so hermes-webui can validate CSRF origin
-    headers["X-Forwarded-Host"] = request.headers.get("Host", "")
+    external_host = getattr(request, '_external_host', None)
+    headers["X-Forwarded-Host"] = external_host or request.headers.get("Host", "")
 
     # Inject profile cookie for all authenticated users
     user_info = users.get_user(username)
@@ -536,6 +576,29 @@ async def _proxy(request: web.Request) -> web.StreamResponse:
     # Handle WebSocket upgrade BEFORE making HTTP request
     if _is_websocket_upgrade(request):
         return await _proxy_websocket(request, url, headers)
+
+    # ── Profile isolation for non-admin users ──
+    if user_info and user_info["role"] != "admin":
+        # Block profile switching: non-admin users cannot change their profile
+        if request.path == "/api/profile/switch" and request.method == "POST":
+            return web.json_response(
+                {"error": "Profile switching is disabled for this account"},
+                status=403,
+            )
+        # Block profile creation/deletion
+        if request.path in ("/api/profile/create", "/api/profile/delete") and request.method == "POST":
+            return web.json_response(
+                {"error": "Profile management is disabled for this account"},
+                status=403,
+            )
+        # Filter profile list to only show the user's own profile
+        if request.path == "/api/profiles" and request.method == "GET":
+            user_profile = user_info["profile"]
+            resp = web.json_response({
+                "profiles": [{"name": user_profile}],
+                "active": user_profile,
+            })
+            return resp
 
     # Forward via aiohttp client session
     session = request.app["client_session"]

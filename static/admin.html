@@ -126,6 +126,21 @@
   .msg{font-size:12px;padding:8px 12px;border-radius:8px;margin-bottom:14px;display:none}
   .msg.success{display:block;background:rgba(80,200,120,.15);color:#50c878;border:1px solid rgba(80,200,120,.3)}
   .msg.error{display:block;background:rgba(233,69,96,.15);color:#e94560;border:1px solid rgba(233,69,96,.3)}
+
+  /* Pagination */
+  .pagination{
+    display:flex;align-items:center;justify-content:center;gap:6px;
+    margin-top:16px;flex-wrap:wrap
+  }
+  .pagination button{
+    padding:5px 12px;border-radius:6px;border:1px solid rgba(255,255,255,.1);
+    background:rgba(255,255,255,.04);color:#e8e8f0;font-size:12px;
+    cursor:pointer;transition:all .15s
+  }
+  .pagination button:hover:not(:disabled){background:rgba(124,185,255,.15);border-color:rgba(124,185,255,.3)}
+  .pagination button:disabled{opacity:.4;cursor:default}
+  .pagination button.active{background:rgba(124,185,255,.2);border-color:rgba(124,185,255,.4);color:#7cb9ff;font-weight:600}
+  .pagination .page-info{font-size:12px;color:#8888aa;padding:0 8px}
 </style>
 </head>
 <body>
@@ -203,6 +218,7 @@
           <tr><td colspan="4" class="empty">加载中...</td></tr>
         </tbody>
       </table>
+      <div id="login-pagination" class="pagination" style="display:none"></div>
     </div>
   </div>
 
@@ -229,6 +245,7 @@
           <tr><td colspan="4" class="empty">加载中...</td></tr>
         </tbody>
       </table>
+      <div id="req-pagination" class="pagination" style="display:none"></div>
     </div>
   </div>
 
@@ -338,6 +355,10 @@
   var API = '/proxy/api/users';
   var users = [];
   var deletingUser = null;
+
+  // ── Pagination state ──
+  var loginPage = 0;   var loginPerPage = 50;   var loginTotal = 0;
+  var reqPage = 0;     var reqPerPage = 50;     var reqTotal = 0;
 
   // ── Tabs ──
   document.querySelectorAll('.tab').forEach(function(tab) {
@@ -522,18 +543,44 @@
     finally { btn.disabled = false; }
   });
 
+  // ── Pagination helper ──
+  function renderPagination(containerId, page, perPage, total, loadFn) {
+    var el = document.getElementById(containerId);
+    var totalPages = Math.ceil(total / perPage);
+    if (totalPages <= 1) { el.style.display = 'none'; el.innerHTML = ''; return; }
+    el.style.display = 'flex';
+    var html = '';
+    html += '<button ' + (page === 0 ? 'disabled' : '') + ' data-page="' + (page - 1) + '">← 上一页</button>';
+    var start = Math.max(0, page - 2);
+    var end = Math.min(totalPages - 1, page + 2);
+    if (start > 0) { html += '<button data-page="0">1</button>'; if (start > 1) html += '<span class="page-info">…</span>'; }
+    for (var i = start; i <= end; i++) { html += '<button class="' + (i === page ? 'active' : '') + '" data-page="' + i + '">' + (i + 1) + '</button>'; }
+    if (end < totalPages - 1) { if (end < totalPages - 2) html += '<span class="page-info">…</span>'; html += '<button data-page="' + (totalPages - 1) + '">' + totalPages + '</button>'; }
+    html += '<button ' + (page >= totalPages - 1 ? 'disabled' : '') + ' data-page="' + (page + 1) + '">下一页 →</button>';
+    html += '<span class="page-info">' + (page + 1) + '/' + totalPages + ' 页，共 ' + total + ' 条</span>';
+    el.innerHTML = html;
+    el.querySelectorAll('button[data-page]').forEach(function(btn) {
+      if (btn.disabled) return;
+      btn.addEventListener('click', function() { loadFn(parseInt(btn.getAttribute('data-page'))); });
+    });
+  }
+
   // ── Login Logs ──
-  window.loadLogs = async function() {
+  window.loadLogs = async function(page) {
+    if (typeof page !== 'number') page = loginPage;
+    loginPage = page;
     var tbody = document.getElementById('log-list');
     tbody.innerHTML = '<tr><td colspan="4" class="empty">加载中...</td></tr>';
     try {
-      var resp = await fetch('/proxy/api/login-log?limit=100', {credentials:'include'});
+      var resp = await fetch('/proxy/api/login-log?limit=' + loginPerPage + '&offset=' + (page * loginPerPage), {credentials:'include'});
       if (resp.status === 403) { window.location.href = '/proxy/login'; return; }
       var data = await resp.json();
+      loginTotal = data.total || 0;
       var log = (data.log || []).reverse(); // newest first
-      document.getElementById('log-count').textContent = '共 ' + log.length + ' 条记录';
+      document.getElementById('log-count').textContent = '共 ' + loginTotal + ' 条记录（保留30天）';
       if (log.length === 0) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无登录记录</td></tr>';
+        renderPagination('login-pagination', page, loginPerPage, loginTotal, loadLogs);
         return;
       }
       tbody.innerHTML = log.map(function(e) {
@@ -544,23 +591,28 @@
           '<td class="ua-cell" title="' + escHtml(e.user_agent) + '">' + escHtml(parseUA(e.user_agent)) + '</td>' +
         '</tr>';
       }).join('');
+      renderPagination('login-pagination', page, loginPerPage, loginTotal, loadLogs);
     } catch(e) {
       tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败</td></tr>';
     }
   };
 
   // ── Request Logs ──
-  window.loadRequests = async function() {
+  window.loadRequests = async function(page) {
+    if (typeof page !== 'number') page = reqPage;
+    reqPage = page;
     var tbody = document.getElementById('req-list');
     tbody.innerHTML = '<tr><td colspan="4" class="empty">加载中...</td></tr>';
     try {
-      var resp = await fetch('/proxy/api/request-log?limit=200', {credentials:'include'});
+      var resp = await fetch('/proxy/api/request-log?limit=' + reqPerPage + '&offset=' + (page * reqPerPage), {credentials:'include'});
       if (resp.status === 403) { window.location.href = '/proxy/login'; return; }
       var data = await resp.json();
+      reqTotal = data.total || 0;
       var log = (data.log || []).reverse(); // newest first
-      document.getElementById('req-count').textContent = '共 ' + log.length + ' 条记录';
+      document.getElementById('req-count').textContent = '共 ' + reqTotal + ' 条记录（保留14天）';
       if (log.length === 0) {
         tbody.innerHTML = '<tr><td colspan="4" class="empty">暂无请求记录</td></tr>';
+        renderPagination('req-pagination', page, reqPerPage, reqTotal, loadRequests);
         return;
       }
       tbody.innerHTML = log.map(function(e) {
@@ -583,6 +635,7 @@
           '<td style="font-size:11px;color:#8888aa;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + escHtml(model) + '">' + escHtml(model) + '</td>' +
         '</tr>';
       }).join('');
+      renderPagination('req-pagination', page, reqPerPage, reqTotal, loadRequests);
     } catch(e) {
       tbody.innerHTML = '<tr><td colspan="4" class="empty">加载失败</td></tr>';
     }
